@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
 
-# 1. IMPORTACIÓN DE TUS MÓDULOS
+# 1. IMPORTACIÓN DE TUS MÓDULOS REAIS
 from nolasco_styles import inject_global_css
 from kpi_renderer import render_kpi_grid, GREEN, RED, AMBER, GREY
 from sabio_fiscal import render_sabio_fiscal
@@ -10,15 +10,19 @@ from fiscal_export import render_seccion_fiscal
 from data_manager import clean_fiscal_data
 
 # 2. CONFIGURACIÓN E INYECCIÓN DE ESTILO
-st.set_page_config(page_title="Fiscal Hub | Login Asesor", layout="wide")
+st.set_page_config(page_title="Fiscal Hub | Portal Asesor", layout="wide")
 inject_global_css("ficahub")
 
-# Inicializar cliente Supabase
-url = st.secrets["SUPABASE_URL"]
-key = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(url, key)
+# Inicializar cliente Supabase (usando st.secrets)
+@st.cache_resource
+def init_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
-# 3. LÓGICA DE AUTENTICACIÓN (LOGIN REAL)
+supabase = init_supabase()
+
+# 3. LÓGICA DE AUTENTICACIÓN (LOGIN)
 def login_form():
     st.markdown('<div class="nc-card" style="max-width:400px; margin: 100px auto;">', unsafe_allow_html=True)
     st.title("🔐 Acceso Asesor")
@@ -32,77 +36,100 @@ def login_form():
             st.success("Acceso concedido")
             st.rerun()
         except Exception as e:
-            st.error("Error: Credenciales no válidas")
+            st.error("Error: Credenciales no válidas o usuario no existe")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # 4. CARGA DE DATOS FILTRADOS
-def load_data():
-    # Solo traemos los inmuebles que pertenecen al usuario logueado
-    user_id = st.session_state.user.id
-    res = supabase.table("inmuebles").select("*").eq("user_id", user_id).execute()
-    df = pd.DataFrame(res.data)
-    return clean_fiscal_data(df)
+@st.cache_data
+def load_data(user_id):
+    try:
+        # Traemos inmuebles vinculados al asesor (user_id)
+        res = supabase.table("inmuebles").select("*").eq("user_id", user_id).execute()
+        df = pd.DataFrame(res.data)
+        return clean_fiscal_data(df)
+    except Exception as e:
+        st.error(f"Error cargando datos: {e}")
+        return pd.DataFrame()
 
-# 5. FUNCIONES PUENTE
+# 5. FUNCIONES PUENTE PARA EL MÓDULO FISCAL_EXPORT
 def safe_float(x):
-    try: return float(str(x).replace(',', '.')) if x else 0.0
-    except: return 0.0
+    try:
+        if x is None or x == "": return 0.0
+        return float(str(x).replace(',', '.'))
+    except:
+        return 0.0
 
 def calcular_modelo_100(row):
-    # Usamos las columnas de tu CSV que sí están en Supabase
+    """Cálculo simplificado del rendimiento neto para la demo"""
     ingresos = safe_float(row.get('renta', 0)) * 12
-    gastos = safe_float(row.get('ibi_anual', 0)) + safe_float(row.get('seguro_anual', 0))
+    # Suma de gastos deducibles básicos
+    gastos = (
+        safe_float(row.get('ibi_anual', 0)) + 
+        safe_float(row.get('seguro_anual', 0)) +
+        safe_float(row.get('comunidad', 0)) +
+        safe_float(row.get('intereses_hipoteca', 0)) +
+        safe_float(row.get('amortizacion_fiscal', 0))
+    )
     return ingresos - gastos
 
-# 6. CUERPO PRINCIPAL
+# 6. FUNCIÓN PRINCIPAL (ENSAMBLAJE)
 def main():
+    # Verificación de Login
     if "user" not in st.session_state:
         login_form()
         st.stop()
 
-    # Si llegamos aquí, el usuario está logueado
-    st.sidebar.write(f"Conectado como: {st.session_state.user.email}")
+    # Sidebar: Info de usuario y Logout
+    st.sidebar.write(f"👤 {st.session_state.user.email}")
     if st.sidebar.button("Cerrar Sesión"):
         supabase.auth.sign_out()
         del st.session_state.user
         st.rerun()
 
-    df = load_data()
+    # Carga de datos del asesor
+    df = load_data(st.session_state.user.id)
     
     if df.empty:
-        st.info("No tienes inmuebles asignados todavía.")
+        st.info("No se han encontrado inmuebles asociados a esta cuenta.")
         return
 
-    # --- SIDEBAR: SELECTOR DE CLIENTE (TITULAR) ---
-    st.sidebar.title("💎 Fiscal Hub Pro")
-    
-    # Si no hay columna 'titular', usamos el campo 'nombre' del inmueble o agrupamos
-    # He visto en tu CSV que la columna se llama 'titular' (ej: alba, alvaro)
+    st.sidebar.divider()
+    st.sidebar.title("💎 Fiscal Hub")
+
+    # Selección de Propietario (Titular)
+    # Buscamos 'titular' y si no existe usamos 'nombre' para no romper la app
     col_propietario = 'titular' if 'titular' in df.columns else 'nombre'
+    lista_propietarios = sorted(df[col_propietario].unique())
+    propietario_sel = st.sidebar.selectbox("Seleccionar Cliente", lista_propietarios)
     
-    lista_clientes = sorted(df[col_propietario].unique())
-    cliente_sel = st.sidebar.selectbox("👤 Seleccionar Cliente", lista_clientes)
-    
-    df_cliente = df[df[col_propietario] == cliente_sel]
-    
+    # Filtrar inmuebles del propietario elegido
+    df_cliente = df[df[col_propietario] == propietario_sel]
+
+    # Navegación
     menu = st.sidebar.radio("Navegación", ["Dashboard", "Fiscalidad", "Sabio IA"])
 
     if menu == "Dashboard":
-        st.title(f"Cartera: {cliente_sel}")
-        # KPIs con tu kpi_renderer
+        st.title(f"Cartera: {propietario_sel}")
+        
+        # Resumen rápido con kpi_renderer
         total_renta = (df_cliente['renta'] * 12).sum()
+        total_neto = df_cliente.apply(calcular_modelo_100, axis=1).sum()
+        
         kpis = [
-            {"label": "Renta Bruta", "value": f"{total_renta:,.0f}€", "color": GREY},
-            {"label": "Activos", "value": str(len(df_cliente)), "color": AMBER}
+            {"label": "Renta Bruta Anual", "value": f"{total_renta:,.0f}€", "color": GREY},
+            {"label": "Rendimiento Neto", "value": f"{total_neto:,.0f}€", "color": GREEN if total_neto > 0 else RED},
+            {"label": "Activos en Cartera", "value": str(len(df_cliente)), "color": AMBER}
         ]
         render_kpi_grid(kpis)
-        st.dataframe(df_cliente[['nombre', 'renta', 'ibi_anual']])
+        
+        st.subheader("Lista de Inmuebles")
+        st.dataframe(df_cliente[['nombre', 'tipo', 'renta', 'ibi_anual']], use_container_width=True)
 
-   elif menu == "Fiscalidad":
+    elif menu == "Fiscalidad":
         st.title("📄 Generación de Informes Fiscales")
         
-        # FIX: Renombramos 'nombre' a 'Nombre' para que fiscal_export.py no de error
-        # También nos aseguramos de que otras columnas críticas tengan la mayúscula que espera el módulo
+        # PARCHE CRÍTICO: Renombrar columnas para que fiscal_export.py las reconozca
+        # Cambiamos minúsculas por las Mayúsculas que espera el archivo de exportación
         df_export = df_cliente.rename(columns={
             'nombre': 'Nombre',
             'renta': 'Renta',
@@ -110,14 +137,15 @@ def main():
             'titular': 'Titular'
         })
         
-        # Enviamos el dataframe con los nombres de columna corregidos
+        # Llamada al módulo de exportación (requiere df_inm, df_mov, safe_float, calc_fun)
         df_mov_vacio = pd.DataFrame() 
         render_seccion_fiscal(df_export, df_mov_vacio, safe_float, calcular_modelo_100)
-    
-    
+
     elif menu == "Sabio IA":
-        contexto = f"Datos: {df_cliente.to_dict('records')}"
-        render_sabio_fiscal("ficahub", contexto)
+        st.title("🤖 Consultoría Estratégica")
+        # Preparamos un resumen para que la IA tenga contexto
+        resumen_contexto = df_cliente[['nombre', 'renta', 'ibi_anual', 'amortizacion_fiscal']].to_dict('records')
+        render_sabio_fiscal("ficahub", f"Contexto del cliente {propietario_sel}: {resumen_contexto}")
 
 if __name__ == "__main__":
     main()
