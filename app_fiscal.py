@@ -58,49 +58,46 @@ def safe_float(x):
     except:
         return 0.0
 
+# CLASE ESPECIAL PARA EVITAR KEYERRORS
+class ModeloDict(dict):
+    """Si se pide una casilla que no existe, devuelve 0.0 en lugar de error."""
+    def __getitem__(self, key):
+        return super().get(key, 0.0)
+
 def calcular_modelo_100(row, df_mov=None, año_fiscal=None):
     """
-    MAPEO TOTAL DE CASILLAS IRPF (MODELO 100)
-    Esta función rellena todas las claves que fiscal_export.py espera.
+    MAPEO ULTRA-COMPATIBLE DE CASILLAS
+    Incluye 0062_0075 y todas las de la serie 0100.
     """
-    # Valores base
     ingresos = safe_float(row.get('renta', 0)) * 12
-    intereses = safe_float(row.get('intereses_hipoteca', 0))
     ibi = safe_float(row.get('ibi_anual', 0))
-    seguros_y_comu = safe_float(row.get('seguro_anual', 0)) + safe_float(row.get('comunidad', 0))
+    intereses = safe_float(row.get('intereses_hipoteca', 0))
+    seguros_comu = safe_float(row.get('seguro_anual', 0)) + safe_float(row.get('comunidad', 0))
     amortizacion = safe_float(row.get('amortizacion_fiscal', 0))
     
-    # Cálculos intermedios
-    total_gastos = intereses + ibi + seguros_y_comu + amortizacion
-    rendimiento_neto = ingresos - total_gastos
+    gastos_deducibles = intereses + ibi + seguros_comu + amortizacion
+    rendimiento_neto = ingresos - gastos_deducibles
     
-    # Reducción por vivienda (estándar 60%)
     reduccion_pct = 0.60
-    reduccion_valor = rendimiento_neto * reduccion_pct if rendimiento_neto > 0 else 0.0
-    rendimiento_reducido = rendimiento_neto - reduccion_valor
+    reduccion_val = rendimiento_neto * reduccion_pct if rendimiento_neto > 0 else 0.0
 
-    # EL DICCIONARIO MAESTRO (Todas las casillas que pide tu código)
-    return {
-        "0101": 0.0,                    # Titularidad (si es 100% o menos)
-        "0102": ingresos,               # INGRESOS ÍNTEGROS
-        "0103": 0.0,                    # Reparaciones
-        "0104": ibi,                    # Tributos/IBI
-        "0105": 0.0,                    # Conservación
-        "0106": intereses,              # Intereses financiación
-        "0107": ibi,                    # (Repetido a veces como Tasas)
-        "0108": 0.0,                    # Gastos jurídicos / formalización
-        "0110": 0.0,                    # Saldos dudoso cobro
-        "0111": seguros_y_comu,         # Servicios y suministros / Comunidad
-        "0112": 0.0,                    # Otros gastos
-        "0113": amortizacion,           # AMORTIZACIÓN
-        "0114": total_gastos,           # Total gastos deducibles
-        "0149": rendimiento_neto,       # RENDIMIENTO NETO
-        "0150": reduccion_valor,        # Reducción por vivienda
-        "0152": rendimiento_reducido,   # Rendimiento neto reducido
-        "0153": rendimiento_reducido,   # RENDIMIENTO NETO REDUCIDO TOTAL
-        "reduccion_pct": reduccion_pct, # % Reducción aplicado
-        "total_gastos": total_gastos
-    }
+    # Usamos ModeloDict para que si falta una casilla (ej. 0062_0075) no explote
+    res = ModeloDict({
+        "0102": ingresos,
+        "0104": ibi,
+        "0106": intereses,
+        "0111": seguros_comu,
+        "0113": amortizacion,
+        "0114": gastos_deducibles,
+        "0149": rendimiento_neto,
+        "0150": reduccion_val,
+        "0152": rendimiento_neto - reduccion_val,
+        "0153": rendimiento_neto - reduccion_val,
+        "0062_0075": ingresos, # Añadida específicamente
+        "reduccion_pct": reduccion_pct,
+        "total_gastos": gastos_deducibles
+    })
+    return res
 
 # 6. FUNCIÓN PRINCIPAL
 def main():
@@ -108,7 +105,6 @@ def main():
         login_form()
         st.stop()
 
-    # Sidebar
     st.sidebar.write(f"👤 {st.session_state.user.email}")
     if st.sidebar.button("Cerrar Sesión"):
         supabase.auth.sign_out()
@@ -120,25 +116,21 @@ def main():
         st.info("No hay datos disponibles.")
         return
 
-    st.sidebar.divider()
     st.sidebar.title("💎 Fiscal Hub Pro")
-
     col_propietario = 'titular' if 'titular' in df.columns else 'nombre'
     lista_propietarios = sorted(df[col_propietario].unique())
     propietario_sel = st.sidebar.selectbox("Seleccionar Cliente", lista_propietarios)
     
     df_cliente = df[df[col_propietario] == propietario_sel]
-
     menu = st.sidebar.radio("Navegación", ["Dashboard", "Fiscalidad", "Sabio IA"])
 
     if menu == "Dashboard":
         st.title(f"Cartera: {propietario_sel}")
         total_renta = (df_cliente['renta'] * 12).sum()
-        # Para el KPI neto usamos la casilla 0149 (Rendimiento Neto)
         total_neto = df_cliente.apply(lambda r: calcular_modelo_100(r)['0149'], axis=1).sum()
         
         kpis = [
-            {"label": "Renta Bruta Anual", "value": f"{total_renta:,.0f}€", "color": GREY},
+            {"label": "Renta Bruta", "value": f"{total_renta:,.0f}€", "color": GREY},
             {"label": "Rendimiento Neto", "value": f"{total_neto:,.0f}€", "color": GREEN if total_neto > 0 else RED},
             {"label": "Activos", "value": str(len(df_cliente)), "color": AMBER}
         ]
@@ -147,22 +139,14 @@ def main():
 
     elif menu == "Fiscalidad":
         st.title("📄 Generación de Informes Fiscales")
-        
-        # Renombrar columnas para compatibilidad visual en fiscal_export.py
-        df_export = df_cliente.rename(columns={
-            'nombre': 'Nombre',
-            'renta': 'Renta',
-            'ibi_anual': 'IBI',
-            'titular': 'Titular'
-        })
-        
+        df_export = df_cliente.rename(columns={'nombre': 'Nombre', 'renta': 'Renta', 'ibi_anual': 'IBI', 'titular': 'Titular'})
         df_mov_vacio = pd.DataFrame() 
         render_seccion_fiscal(df_export, df_mov_vacio, safe_float, calcular_modelo_100)
 
     elif menu == "Sabio IA":
         st.title("🤖 Consultoría Estratégica")
         resumen = df_cliente[['nombre', 'renta', 'ibi_anual']].to_dict('records')
-        render_sabio_fiscal("ficahub", f"Analiza la fiscalidad de: {resumen}")
+        render_sabio_fiscal("ficahub", f"Analiza: {resumen}")
 
 if __name__ == "__main__":
     main()
