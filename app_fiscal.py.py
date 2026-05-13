@@ -2,105 +2,115 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 
-# 1. IMPORTACIÓN DE TUS MÓDULOS REALES
+# 1. IMPORTACIÓN DE TUS MÓDULOS
 from nolasco_styles import inject_global_css
 from kpi_renderer import render_kpi_grid, GREEN, RED, AMBER, GREY
 from sabio_fiscal import render_sabio_fiscal
 from fiscal_export import render_seccion_fiscal
-from data_manager import clean_fiscal_data, get_resumen_por_propietario
+from data_manager import clean_fiscal_data
 
-# 2. CONFIGURACIÓN
-st.set_page_config(page_title="Fiscal Hub | Portal Asesor", layout="wide")
+# 2. CONFIGURACIÓN INICIAL
+st.set_page_config(page_title="Fiscal Hub | Acceso Asesor", layout="wide")
 inject_global_css("ficahub")
 
-# Funciones puente que pide tu fiscal_export.py
-def safe_float(x):
-    try:
-        if x is None or x == "": return 0.0
-        return float(str(x).replace(',', '.'))
-    except:
-        return 0.0
+# 3. SISTEMA DE LOGIN SENCILLO
+def check_password():
+    """Devuelve True si el usuario introdujo la contraseña correcta."""
+    def password_entered():
+        # Aquí puedes poner la contraseña que quieras
+        if st.session_state["password"] == "asesor2024":
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # No guardamos la contraseña
+        else:
+            st.session_state["password_correct"] = False
 
-def calcular_modelo_100(row):
-    """Cálculo exacto para el Modelo 100 basado en tus columnas"""
-    ingresos = safe_float(row.get('renta', 0)) * 12
-    # Gastos deducibles (Límite intereses + reparación = ingresos, el resto suma)
-    deducibles = (
-        safe_float(row.get('ibi_anual', 0)) +
-        safe_float(row.get('seguro_anual', 0)) +
-        safe_float(row.get('comunidad', 0)) +
-        safe_float(row.get('intereses_hipoteca', 0)) +
-        safe_float(row.get('amortizacion_fiscal', 0))
-    )
-    return ingresos - deducibles
+    if "password_correct" not in st.session_state:
+        # Pantalla de Login
+        st.markdown('<div class="nc-card" style="max-width:400px; margin: 100px auto;">', unsafe_allow_html=True)
+        st.title("🔐 Acceso Fiscal Hub")
+        st.text_input("Contraseña de Asesor", type="password", on_change=password_entered, key="password")
+        if "password_correct" in st.session_state:
+            st.error("😕 Contraseña incorrecta")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return False
+    return st.session_state["password_correct"]
 
-# 3. CARGA DE DATOS
+# 4. CARGA DE DATOS (Asegura traer TODOS los registros)
 @st.cache_data
 def load_all_data():
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         supabase = create_client(url, key)
+        # Traemos todos sin límites para ver a todos los propietarios
         res = supabase.table("inmuebles").select("*").execute()
         df = pd.DataFrame(res.data)
         return clean_fiscal_data(df)
     except Exception as e:
-        st.error(f"Error cargando Supabase: {e}")
+        st.error(f"Error de conexión con Supabase: {e}")
         return pd.DataFrame()
 
+# 5. FUNCIONES PUENTE PARA EXPORTACIÓN
+def safe_float(x):
+    try: return float(str(x).replace(',', '.')) if x else 0.0
+    except: return 0.0
+
+def calcular_modelo_100(row):
+    ingresos = safe_float(row.get('renta', 0)) * 12
+    gastos = sum([safe_float(row.get(c, 0)) for c in ['ibi_anual', 'seguro_anual', 'intereses_hipoteca', 'comunidad', 'amortizacion_fiscal']])
+    return ingresos - gastos
+
+# 6. INTERFAZ PRINCIPAL
 def main():
+    if not check_password():
+        st.stop()  # Si no hay login, se detiene aquí
+
     df = load_all_data()
+    
     if df.empty:
-        st.warning("Base de datos vacía o desconectada.")
+        st.info("Esperando datos de Supabase...")
         return
 
-    # --- SIDEBAR: GESTIÓN DE CARTERA ---
-    st.sidebar.title("💎 Fiscal Hub Pro")
+    # --- SIDEBAR: MULTI-PROPIETARIO ---
+    st.sidebar.image("https://odxixtgqcyddfqaapqgi.supabase.co/storage/v1/object/public/logos/logo_fiscalhub.png", width=200) # Si tienes logo
+    st.sidebar.title("Panel de Control")
     
-    # Selector de Propietario (Tus 3 clientes creados)
-    lista_titulares = sorted(df['titular'].unique())
-    titular_sel = st.sidebar.selectbox("👤 Seleccionar Cliente", lista_titulares)
+    # Aquí obtenemos la lista de todos los titulares diferentes
+    propietarios = sorted(df['titular'].unique())
+    titular_sel = st.sidebar.selectbox("👤 Seleccionar Cliente", propietarios)
     
-    # Filtrar datos por ese cliente
+    # Filtramos la base de datos por el dueño elegido
     df_cliente = df[df['titular'] == titular_sel]
     
-    menu = st.sidebar.radio("Navegación", ["Dashboard Cartera", "Ficha Inmueble", "Fiscalidad (Export)", "Sabio IA"])
+    menu = st.sidebar.radio("Sección", ["Resumen Cartera", "Detalle Activo", "Fiscalidad", "Sabio IA"])
 
-    if menu == "Dashboard Cartera":
-        st.title(f"Cartera de {titular_sel}")
-        resumen = get_resumen_por_propietario(df_cliente)
-        
-        # KPIs Globales del Cliente usando tu kpi_renderer
-        total_renta = df_cliente['ingresos_anuales'].sum()
-        total_neto = df_cliente['rendimiento_neto'].sum()
+    if menu == "Resumen Cartera":
+        st.title(f"Cartera: {titular_sel}")
+        # KPIs totales del cliente
+        total_renta = (df_cliente['renta'] * 12).sum()
+        total_neto = df_cliente.apply(calcular_modelo_100, axis=1).sum()
         
         kpis = [
-            {"label": "Ingresos Totales", "value": f"{total_renta:,.0f}€", "color": GREY},
+            {"label": "Renta Bruta Anual", "value": f"{total_renta:,.0f}€", "color": GREY},
             {"label": "Rendimiento Neto", "value": f"{total_neto:,.0f}€", "color": GREEN if total_neto > 0 else RED},
-            {"label": "Nº Activos", "value": f"{len(df_cliente)}", "color": AMBER}
+            {"label": "Nº de Inmuebles", "value": f"{len(df_cliente)}", "color": AMBER}
         ]
         render_kpi_grid(kpis)
         
-        st.subheader("Desglose de Activos")
-        st.dataframe(df_cliente[['nombre', 'renta', 'rendimiento_neto', 'ibi_anual']], use_container_width=True)
+        st.subheader("Inmuebles vinculados")
+        st.table(df_cliente[['nombre', 'tipo', 'renta', 'ibi_anual']])
 
-    elif menu == "Ficha Inmueble":
-        inmueble_sel = st.selectbox("Seleccionar activo", df_cliente['nombre'])
-        row = df_cliente[df_cliente['nombre'] == inmueble_sel].iloc[0]
-        
-        st.title(f"🏠 {inmueble_sel}")
-        # Aquí puedes usar el código de KPIs que te pasé anteriormente...
+    elif menu == "Detalle Activo":
+        inmueble = st.selectbox("Activo a analizar", df_cliente['nombre'])
+        row = df_cliente[df_cliente['nombre'] == inmueble].iloc[0]
+        st.title(f"🏠 {inmueble}")
+        # Aquí meteríamos los KPIs individuales que ya vimos
 
-    elif menu == "Fiscalidad (Export)":
-        st.title("📄 Generación de Informes Fiscales")
-        # Esta es la conexión crítica con tu fiscal_export.py
-        # Le pasamos el DF filtrado del cliente para que solo exporte lo suyo
-        df_mov_vacio = pd.DataFrame() # Si no usas movimientos de caja aún
-        render_seccion_fiscal(df_cliente, df_mov_vacio, safe_float, calcular_modelo_100)
+    elif menu == "Fiscalidad":
+        render_seccion_fiscal(df_cliente, pd.DataFrame(), safe_float, calcular_modelo_100)
 
     elif menu == "Sabio IA":
-        st.title("🤖 Consultoría Estratégica")
-        contexto = f"Cliente {titular_sel} con {len(df_cliente)} inmuebles. Datos: {df_cliente.to_dict()}"
+        contexto = f"Datos del cliente {titular_sel}: {df_cliente.to_dict('records')}"
         render_sabio_fiscal("ficahub", contexto)
 
 if __name__ == "__main__":
