@@ -22,7 +22,7 @@ def init_supabase():
 
 supabase = init_supabase()
 
-# 3. LÓGICA DE AUTENTICACIÓN (LOGIN)
+# 3. LÓGICA DE LOGIN
 def login_form():
     st.markdown('<div class="nc-card" style="max-width:400px; margin: 100px auto;">', unsafe_allow_html=True)
     st.title("🔐 Acceso Asesor")
@@ -39,11 +39,10 @@ def login_form():
             st.error("Error: Credenciales no válidas")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# 4. CARGA DE DATOS FILTRADOS
+# 4. CARGA DE DATOS
 @st.cache_data
 def load_data(user_id):
     try:
-        # Cargamos todos para la demo, o filtramos por user_id si ya tienes la columna
         res = supabase.table("inmuebles").select("*").execute()
         df = pd.DataFrame(res.data)
         return clean_fiscal_data(df)
@@ -61,28 +60,46 @@ def safe_float(x):
 
 def calcular_modelo_100(row, df_mov=None, año_fiscal=None):
     """
-    REPARACIÓN CRÍTICA: Devuelve el diccionario de casillas que espera fiscal_export.py
+    MAPEO TOTAL DE CASILLAS IRPF (MODELO 100)
+    Esta función rellena todas las claves que fiscal_export.py espera.
     """
+    # Valores base
     ingresos = safe_float(row.get('renta', 0)) * 12
     intereses = safe_float(row.get('intereses_hipoteca', 0))
     ibi = safe_float(row.get('ibi_anual', 0))
-    seguros_comu = safe_float(row.get('seguro_anual', 0)) + safe_float(row.get('comunidad', 0))
+    seguros_y_comu = safe_float(row.get('seguro_anual', 0)) + safe_float(row.get('comunidad', 0))
     amortizacion = safe_float(row.get('amortizacion_fiscal', 0))
     
-    gastos_deducibles = intereses + ibi + seguros_comu + amortizacion
-    rendimiento_neto = ingresos - gastos_deducibles
+    # Cálculos intermedios
+    total_gastos = intereses + ibi + seguros_y_comu + amortizacion
+    rendimiento_neto = ingresos - total_gastos
+    
+    # Reducción por vivienda (estándar 60%)
+    reduccion_pct = 0.60
+    reduccion_valor = rendimiento_neto * reduccion_pct if rendimiento_neto > 0 else 0.0
+    rendimiento_reducido = rendimiento_neto - reduccion_valor
 
-    # Diccionario con las casillas que busca tu archivo fiscal_export.py
+    # EL DICCIONARIO MAESTRO (Todas las casillas que pide tu código)
     return {
-        '0102': ingresos,          # Ingresos íntegros
-        '0103': 0.0,               # Gastos reparación (puedes añadir columna luego)
-        '0104': ibi,               # Tributos
-        '0106': intereses,         # Intereses
-        '0105': seguros_comu,      # Otros gastos (Seguro + Comunidad)
-        '0107': amortizacion,      # Amortización
-        '0108': gastos_deducibles, # Total gastos
-        '0109': rendimiento_neto,  # Rendimiento Neto
-        'total_gastos': gastos_deducibles
+        "0101": 0.0,                    # Titularidad (si es 100% o menos)
+        "0102": ingresos,               # INGRESOS ÍNTEGROS
+        "0103": 0.0,                    # Reparaciones
+        "0104": ibi,                    # Tributos/IBI
+        "0105": 0.0,                    # Conservación
+        "0106": intereses,              # Intereses financiación
+        "0107": ibi,                    # (Repetido a veces como Tasas)
+        "0108": 0.0,                    # Gastos jurídicos / formalización
+        "0110": 0.0,                    # Saldos dudoso cobro
+        "0111": seguros_y_comu,         # Servicios y suministros / Comunidad
+        "0112": 0.0,                    # Otros gastos
+        "0113": amortizacion,           # AMORTIZACIÓN
+        "0114": total_gastos,           # Total gastos deducibles
+        "0149": rendimiento_neto,       # RENDIMIENTO NETO
+        "0150": reduccion_valor,        # Reducción por vivienda
+        "0152": rendimiento_reducido,   # Rendimiento neto reducido
+        "0153": rendimiento_reducido,   # RENDIMIENTO NETO REDUCIDO TOTAL
+        "reduccion_pct": reduccion_pct, # % Reducción aplicado
+        "total_gastos": total_gastos
     }
 
 # 6. FUNCIÓN PRINCIPAL
@@ -91,6 +108,7 @@ def main():
         login_form()
         st.stop()
 
+    # Sidebar
     st.sidebar.write(f"👤 {st.session_state.user.email}")
     if st.sidebar.button("Cerrar Sesión"):
         supabase.auth.sign_out()
@@ -98,9 +116,8 @@ def main():
         st.rerun()
 
     df = load_data(st.session_state.user.id)
-    
     if df.empty:
-        st.info("No hay inmuebles asociados.")
+        st.info("No hay datos disponibles.")
         return
 
     st.sidebar.divider()
@@ -117,9 +134,8 @@ def main():
     if menu == "Dashboard":
         st.title(f"Cartera: {propietario_sel}")
         total_renta = (df_cliente['renta'] * 12).sum()
-        
-        # Obtenemos el neto sumando la casilla '0109' de cada inmueble
-        total_neto = df_cliente.apply(lambda r: calcular_modelo_100(r)['0109'], axis=1).sum()
+        # Para el KPI neto usamos la casilla 0149 (Rendimiento Neto)
+        total_neto = df_cliente.apply(lambda r: calcular_modelo_100(r)['0149'], axis=1).sum()
         
         kpis = [
             {"label": "Renta Bruta Anual", "value": f"{total_renta:,.0f}€", "color": GREY},
@@ -132,7 +148,7 @@ def main():
     elif menu == "Fiscalidad":
         st.title("📄 Generación de Informes Fiscales")
         
-        # Parche de nombres de columna
+        # Renombrar columnas para compatibilidad visual en fiscal_export.py
         df_export = df_cliente.rename(columns={
             'nombre': 'Nombre',
             'renta': 'Renta',
@@ -141,13 +157,12 @@ def main():
         })
         
         df_mov_vacio = pd.DataFrame() 
-        # Ahora sí, le pasamos la función que devuelve el diccionario correcto
         render_seccion_fiscal(df_export, df_mov_vacio, safe_float, calcular_modelo_100)
 
     elif menu == "Sabio IA":
         st.title("🤖 Consultoría Estratégica")
         resumen = df_cliente[['nombre', 'renta', 'ibi_anual']].to_dict('records')
-        render_sabio_fiscal("ficahub", f"Datos del cliente {propietario_sel}: {resumen}")
+        render_sabio_fiscal("ficahub", f"Analiza la fiscalidad de: {resumen}")
 
 if __name__ == "__main__":
     main()
