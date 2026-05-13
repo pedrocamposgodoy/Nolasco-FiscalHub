@@ -98,9 +98,23 @@ def main():
         render_kpi_grid(kpis)
         st.dataframe(df_cliente[['nombre', 'renta', 'ibi_anual']])
 
-    elif menu == "Fiscalidad":
-        render_seccion_fiscal(df_cliente, pd.DataFrame(), safe_float, calcular_modelo_100)
-
+   elif menu == "Fiscalidad":
+        st.title("📄 Generación de Informes Fiscales")
+        
+        # FIX: Renombramos 'nombre' a 'Nombre' para que fiscal_export.py no de error
+        # También nos aseguramos de que otras columnas críticas tengan la mayúscula que espera el módulo
+        df_export = df_cliente.rename(columns={
+            'nombre': 'Nombre',
+            'renta': 'Renta',
+            'ibi_anual': 'IBI',
+            'titular': 'Titular'
+        })
+        
+        # Enviamos el dataframe con los nombres de columna corregidos
+        df_mov_vacio = pd.DataFrame() 
+        render_seccion_fiscal(df_export, df_mov_vacio, safe_float, calcular_modelo_100)
+    
+    
     elif menu == "Sabio IA":
         contexto = f"Datos: {df_cliente.to_dict('records')}"
         render_sabio_fiscal("ficahub", contexto)
