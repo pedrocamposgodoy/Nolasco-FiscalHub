@@ -43,6 +43,7 @@ def login_form():
 @st.cache_data
 def load_data(user_id):
     try:
+        # Cargamos todos para la demo
         res = supabase.table("inmuebles").select("*").execute()
         df = pd.DataFrame(res.data)
         return clean_fiscal_data(df)
@@ -58,17 +59,13 @@ def safe_float(x):
     except:
         return 0.0
 
-# CLASE ESPECIAL PARA EVITAR KEYERRORS
 class ModeloDict(dict):
-    """Si se pide una casilla que no existe, devuelve 0.0 en lugar de error."""
+    """Evita que la app se rompa si falta una casilla del IRPF."""
     def __getitem__(self, key):
         return super().get(key, 0.0)
 
 def calcular_modelo_100(row, df_mov=None, año_fiscal=None):
-    """
-    MAPEO ULTRA-COMPATIBLE DE CASILLAS
-    Incluye 0062_0075 y todas las de la serie 0100.
-    """
+    """Mapeo de casillas compatible con fiscal_export.py"""
     ingresos = safe_float(row.get('renta', 0)) * 12
     ibi = safe_float(row.get('ibi_anual', 0))
     intereses = safe_float(row.get('intereses_hipoteca', 0))
@@ -78,24 +75,11 @@ def calcular_modelo_100(row, df_mov=None, año_fiscal=None):
     gastos_deducibles = intereses + ibi + seguros_comu + amortizacion
     rendimiento_neto = ingresos - gastos_deducibles
     
-    reduccion_pct = 0.60
-    reduccion_val = rendimiento_neto * reduccion_pct if rendimiento_neto > 0 else 0.0
-
-    # Usamos ModeloDict para que si falta una casilla (ej. 0062_0075) no explote
     res = ModeloDict({
-        "0102": ingresos,
-        "0104": ibi,
-        "0106": intereses,
-        "0111": seguros_comu,
-        "0113": amortizacion,
-        "0114": gastos_deducibles,
-        "0149": rendimiento_neto,
-        "0150": reduccion_val,
-        "0152": rendimiento_neto - reduccion_val,
-        "0153": rendimiento_neto - reduccion_val,
-        "0062_0075": ingresos, # Añadida específicamente
-        "reduccion_pct": reduccion_pct,
-        "total_gastos": gastos_deducibles
+        "0102": ingresos, "0104": ibi, "0106": intereses,
+        "0111": seguros_comu, "0113": amortizacion,
+        "0149": rendimiento_neto, "0150": rendimiento_neto * 0.6 if rendimiento_neto > 0 else 0.0,
+        "0062_0075": ingresos, "reduccion_pct": 0.60, "total_gastos": gastos_deducibles
     })
     return res
 
@@ -105,6 +89,7 @@ def main():
         login_form()
         st.stop()
 
+    # Sidebar: Info
     st.sidebar.write(f"👤 {st.session_state.user.email}")
     if st.sidebar.button("Cerrar Sesión"):
         supabase.auth.sign_out()
@@ -117,6 +102,8 @@ def main():
         return
 
     st.sidebar.title("💎 Fiscal Hub Pro")
+    
+    # Selector de Propietario (Titular)
     col_propietario = 'titular' if 'titular' in df.columns else 'nombre'
     lista_propietarios = sorted(df[col_propietario].unique())
     propietario_sel = st.sidebar.selectbox("Seleccionar Cliente", lista_propietarios)
@@ -140,13 +127,18 @@ def main():
     elif menu == "Fiscalidad":
         st.title("📄 Generación de Informes Fiscales")
         df_export = df_cliente.rename(columns={'nombre': 'Nombre', 'renta': 'Renta', 'ibi_anual': 'IBI', 'titular': 'Titular'})
-        df_mov_vacio = pd.DataFrame() 
-        render_seccion_fiscal(df_export, df_mov_vacio, safe_float, calcular_modelo_100)
+        render_seccion_fiscal(df_export, pd.DataFrame(), safe_float, calcular_modelo_100)
 
     elif menu == "Sabio IA":
-        st.title("🤖 Consultoría Estratégica")
+        st.title("🤖 Sabio Fiscal")
         resumen = df_cliente[['nombre', 'renta', 'ibi_anual']].to_dict('records')
-        render_sabio_fiscal("ficahub", f"Analiza: {resumen}")
+        
+        # FIX: Añadimos el argumento 'seccion' para que no de TypeError
+        render_sabio_fiscal(
+            app="ficahub", 
+            seccion=f"analisis_{propietario_sel.replace(' ', '_')}", 
+            contexto=f"Datos del cliente {propietario_sel}: {resumen}"
+        )
 
 if __name__ == "__main__":
     main()
