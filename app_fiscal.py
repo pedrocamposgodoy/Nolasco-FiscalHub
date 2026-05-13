@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
 
-# 1. IMPORTACIÓN DE TUS MÓDULOS REAIS
+# 1. IMPORTACIÓN DE TUS MÓDULOS
 from nolasco_styles import inject_global_css
 from kpi_renderer import render_kpi_grid, GREEN, RED, AMBER, GREY
 from sabio_fiscal import render_sabio_fiscal
@@ -58,9 +58,8 @@ def safe_float(x):
     except:
         return 0.0
 
-# REPARACIÓN AQUÍ: Ahora acepta (row, df_mov, año_fiscal) como pide el exportador
+# REPARACIÓN: Firma compatible con fiscal_export.py (acepta row, df_mov y año_fiscal)
 def calcular_modelo_100(row, df_mov=None, año_fiscal=None):
-    """Cálculo compatible con la firma que espera fiscal_export.py"""
     ingresos = safe_float(row.get('renta', 0)) * 12
     gastos = (
         safe_float(row.get('ibi_anual', 0)) + 
@@ -73,36 +72,42 @@ def calcular_modelo_100(row, df_mov=None, año_fiscal=None):
 
 # 6. FUNCIÓN PRINCIPAL
 def main():
+    # Verificación de usuario
     if "user" not in st.session_state:
         login_form()
         st.stop()
 
+    # Sidebar: Usuario y Logout
     st.sidebar.write(f"👤 {st.session_state.user.email}")
     if st.sidebar.button("Cerrar Sesión"):
         supabase.auth.sign_out()
         del st.session_state.user
         st.rerun()
 
+    # Carga de datos
     df = load_data(st.session_state.user.id)
     
     if df.empty:
-        st.info("No hay inmuebles asociados.")
+        st.info("No se han encontrado inmuebles asociados a esta cuenta.")
         return
 
     st.sidebar.divider()
-    st.sidebar.title("💎 Fiscal Hub")
+    st.sidebar.title("💎 Fiscal Hub Pro")
 
+    # Identificar columna de propietario (titular)
     col_propietario = 'titular' if 'titular' in df.columns else 'nombre'
     lista_propietarios = sorted(df[col_propietario].unique())
     propietario_sel = st.sidebar.selectbox("Seleccionar Cliente", lista_propietarios)
     
     df_cliente = df[df[col_propietario] == propietario_sel]
 
+    # Menú de Navegación
     menu = st.sidebar.radio("Navegación", ["Dashboard", "Fiscalidad", "Sabio IA"])
 
     if menu == "Dashboard":
         st.title(f"Cartera: {propietario_sel}")
         total_renta = (df_cliente['renta'] * 12).sum()
+        # Usamos lambda para llamar a la función solo con el primer argumento en el Dashboard
         total_neto = df_cliente.apply(lambda r: calcular_modelo_100(r), axis=1).sum()
         
         kpis = [
@@ -116,7 +121,7 @@ def main():
     elif menu == "Fiscalidad":
         st.title("📄 Generación de Informes Fiscales")
         
-        # Parche de mayúsculas
+        # Parche de mayúsculas para compatibilidad con fiscal_export.py
         df_export = df_cliente.rename(columns={
             'nombre': 'Nombre',
             'renta': 'Renta',
@@ -125,13 +130,13 @@ def main():
         })
         
         df_mov_vacio = pd.DataFrame() 
-        # Ahora pasamos la función con la firma correcta
+        # Llamada al exportador con la función corregida
         render_seccion_fiscal(df_export, df_mov_vacio, safe_float, calcular_modelo_100)
 
     elif menu == "Sabio IA":
         st.title("🤖 Consultoría Estratégica")
         resumen = df_cliente[['nombre', 'renta', 'ibi_anual']].to_dict('records')
-        render_sabio_fiscal("ficahub", f"Datos del cliente {propietario_sel}: {resumen}")
+        render_sabio_fiscal("ficahub", f"Contexto del cliente {propietario_sel}: {resumen}")
 
 if __name__ == "__main__":
     main()
