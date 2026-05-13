@@ -1,0 +1,8 @@
+streamlit
+pandas
+supabase
+anthropic
+requests
+openpyxl
+reportlab
+python-dotenv
